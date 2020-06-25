@@ -32,7 +32,7 @@ type Config struct {
 	Cache  persist.Cacher
 	Repos  []string
 	// DebugNumber is useful when you want to debug why a single issue is or is-not appearing
-	DebugNumber int
+	DebugNumbers []int
 }
 
 type Party struct {
@@ -43,15 +43,21 @@ type Party struct {
 	client        *github.Client
 	rules         map[string]Rule
 	reposOverride []string
-	debugNumber   int
+	debug         map[int]bool
 }
 
 func New(cfg Config) *Party {
+
 	p := &Party{
 		cache:         cfg.Cache,
 		reposOverride: cfg.Repos,
-		debugNumber:   cfg.DebugNumber,
 		client:        cfg.Client,
+		debug:         map[int]bool{},
+	}
+
+	for _, n := range cfg.DebugNumbers {
+		klog.Infof("DEBUG: Adding #%d", n)
+		p.debug[n] = true
 	}
 
 	// p.engine is unset until Load() is called
@@ -98,7 +104,7 @@ func (p *Party) newEngine() *hubbub.Engine {
 		Client:             p.client,
 		Cache:              p.cache,
 		Repos:              p.reposOverride,
-		DebugNumber:        p.debugNumber,
+		DebugNumbers:       p.debug,
 		MaxClosedUpdateAge: maxClosedUpdateAge,
 		MinSimilarity:      p.settings.MinSimilarity,
 		MemberRoles:        roles,
@@ -175,7 +181,7 @@ func closedAge(fs []hubbub.Filter) time.Duration {
 
 	if oldest == 0 {
 		klog.Warningf("I need closed data, but I'm not sure how old: picking 4 days")
-		return time.Duration(24 * 4 * time.Hour)
+		return 24 * 4 * time.Hour
 	}
 
 	return oldest

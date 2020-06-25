@@ -1,12 +1,45 @@
+// Copyright 2020 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package hubbub
 
 import (
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/go-github/v31/github"
 	"k8s.io/klog/v2"
+
+	"github.com/google/triage-party/pkg/tag"
+)
+
+var (
+	// wordRelRefRe parses relative issue references, like "fixes #3402"
+	wordRelRefRe = regexp.MustCompile(`\s#(\d+)\b`)
+
+	// puncRelRefRe parses relative issue references, like "fixes #3402."
+	puncRelRefRe = regexp.MustCompile(`\s\#(\d+)[\.\!:\?]`)
+
+	// absRefRe parses absolute issue references, like "fixes http://github.com/minikube/issues/432"
+	absRefRe = regexp.MustCompile(`https*://github.com/(\w+)/(\w+)/[ip][us]\w+/(\d+)`)
+
+	// codeRe matches code
+	codeRe    = regexp.MustCompile("(?s)```.*?```")
+	detailsRe = regexp.MustCompile(`(?s)<details>.*</details>`)
 )
 
 // GitHubItem is an interface that matches both GitHub Issues and PullRequests
@@ -59,10 +92,11 @@ func (h *Engine) conversation(i GitHubItem, cs []*Comment, age time.Time) *Conve
 	urlParts := strings.Split(i.GetHTMLURL(), "/")
 	co.Organization = urlParts[3]
 	co.Project = urlParts[4]
+	h.parseRefs(i.GetBody(), co, i.GetUpdatedAt())
 
 	if i.GetAssignee() != nil {
 		co.Assignees = append(co.Assignees, i.GetAssignee())
-		co.Tags = append(co.Tags, assignedTag())
+		co.Tags = append(co.Tags, tag.Assigned)
 	}
 
 	if !authorIsMember {
@@ -74,12 +108,13 @@ func (h *Engine) conversation(i GitHubItem, cs []*Comment, age time.Time) *Conve
 	seenClosedCommenters := map[string]bool{}
 	seenMemberComment := false
 
-	if co.ID == h.debugNumber {
+	if h.debug[co.ID] {
 		klog.Errorf("debug conversation: %s", formatStruct(co))
 	}
 
 	for _, c := range cs {
-		if co.ID == h.debugNumber {
+		h.parseRefs(c.Body, co, c.Updated)
+		if h.debug[co.ID] {
 			klog.Errorf("debug conversation comment: %s", formatStruct(c))
 		}
 
@@ -119,7 +154,7 @@ func (h *Engine) conversation(i GitHubItem, cs []*Comment, age time.Time) *Conve
 			}
 			co.LatestMemberResponse = c.Created
 			if !seenMemberComment {
-				co.Tags = append(co.Tags, commentedTag())
+				co.Tags = append(co.Tags, tag.Commented)
 				seenMemberComment = true
 			}
 		}
@@ -145,26 +180,26 @@ func (h *Engine) conversation(i GitHubItem, cs []*Comment, age time.Time) *Conve
 
 	if co.LatestMemberResponse.After(co.LatestAuthorResponse) {
 		klog.V(2).Infof("marking as send: latest member response (%s) is after latest author response (%s)", co.LatestMemberResponse, co.LatestAuthorResponse)
-		co.Tags = append(co.Tags, sendTag())
+		co.Tags = append(co.Tags, tag.Send)
 		co.CurrentHoldTime = 0
 	} else if !authorIsMember {
 		klog.V(2).Infof("marking as recv: author is not member, latest member response (%s) is before latest author response (%s)", co.LatestMemberResponse, co.LatestAuthorResponse)
-		co.Tags = append(co.Tags, recvTag())
+		co.Tags = append(co.Tags, tag.Recv)
 		co.CurrentHoldTime += time.Since(co.LatestAuthorResponse)
 		co.AccumulatedHoldTime += time.Since(co.LatestAuthorResponse)
 	}
 
 	if lastQuestion.After(co.LatestMemberResponse) {
 		klog.V(2).Infof("marking as recv-q: last question (%s) comes after last member response (%s)", lastQuestion, co.LatestMemberResponse)
-		co.Tags = append(co.Tags, recvQTag())
+		co.Tags = append(co.Tags, tag.RecvQ)
 	}
 
 	if co.Milestone != nil && co.Milestone.GetState() == "open" {
-		co.Tags = append(co.Tags, openMilestoneTag())
+		co.Tags = append(co.Tags, tag.OpenMilestone)
 	}
 
 	if !co.LatestAssigneeResponse.IsZero() {
-		co.Tags = append(co.Tags, assigneeUpdatedTag())
+		co.Tags = append(co.Tags, tag.AssigneeUpdated)
 	}
 
 	if len(cs) > 0 {
@@ -172,16 +207,16 @@ func (h *Engine) conversation(i GitHubItem, cs []*Comment, age time.Time) *Conve
 		assoc := strings.ToLower(last.AuthorAssoc)
 		if assoc == "none" {
 			if last.User.GetLogin() == i.GetUser().GetLogin() {
-				co.Tags = append(co.Tags, authorLast())
+				co.Tags = append(co.Tags, tag.AuthorLast)
 			}
 		} else {
-			co.Tags = append(co.Tags, assocLast(assoc))
+			co.Tags = append(co.Tags, tag.RoleLast(assoc))
 		}
 		co.Updated = last.Updated
 	}
 
 	if co.State == "closed" {
-		co.Tags = append(co.Tags, closedTag())
+		co.Tags = append(co.Tags, tag.Closed)
 	}
 
 	co.CommentersTotal = len(seenCommenters)
@@ -193,8 +228,8 @@ func (h *Engine) conversation(i GitHubItem, cs []*Comment, age time.Time) *Conve
 
 	// Loose, but good enough
 	months := time.Since(co.Created).Hours() / 24 / 30
-	co.CommentersPerMonth = float64(co.CommentersTotal) / float64(months)
-	co.ReactionsPerMonth = float64(co.ReactionsTotal) / float64(months)
+	co.CommentersPerMonth = float64(co.CommentersTotal) / months
+	co.ReactionsPerMonth = float64(co.ReactionsTotal) / months
 	return co
 }
 
@@ -213,80 +248,76 @@ func (h *Engine) isMember(user string, role string) bool {
 	return false
 }
 
-func dedupTags(tags []Tag) []Tag {
-	deduped := []Tag{}
+// parse any references and update mention time
+func (h *Engine) parseRefs(text string, co *Conversation, t time.Time) {
+
+	// remove code samples which mention unrelated issues
+	text = codeRe.ReplaceAllString(text, "<code></code>")
+	text = detailsRe.ReplaceAllString(text, "<details></details>")
+
+	var ms [][]string
+	ms = append(ms, wordRelRefRe.FindAllStringSubmatch(text, -1)...)
+	ms = append(ms, puncRelRefRe.FindAllStringSubmatch(text, -1)...)
+
 	seen := map[string]bool{}
 
-	for _, t := range tags {
-		if seen[t.ID] {
+	for _, m := range ms {
+		i, err := strconv.Atoi(m[1])
+		if err != nil {
+			klog.Errorf("unable to parse int from %s: %v", err)
 			continue
 		}
-		deduped = append(deduped, t)
-		seen[t.ID] = true
+
+		if i == co.ID {
+			continue
+		}
+
+		rc := &RelatedConversation{
+			Organization: co.Organization,
+			Project:      co.Project,
+			ID:           i,
+			Seen:         t,
+		}
+
+		if t.After(h.mtimeRef(rc)) {
+			klog.Infof("%s later referenced #%d at %s: %s", co.URL, i, t, text)
+			h.updateMtimeLong(co.Organization, co.Project, i, t)
+		}
+
+		if !seen[fmt.Sprintf("%s/%d", rc.Project, rc.ID)] {
+			co.IssueRefs = append(co.IssueRefs, rc)
+		}
+		seen[fmt.Sprintf("%s/%d", rc.Project, rc.ID)] = true
 	}
 
-	return deduped
-}
+	for _, m := range absRefRe.FindAllStringSubmatch(text, -1) {
+		org := m[1]
+		project := m[2]
+		i, err := strconv.Atoi(m[3])
+		if err != nil {
+			klog.Errorf("unable to parse int from %s: %v", err)
+			continue
+		}
 
-func assignedTag() Tag {
-	return Tag{
-		ID:          "assigned",
-		Description: "Someone is assigned",
-	}
-}
+		if i == co.ID && org == co.Organization && project == co.Project {
+			continue
+		}
 
-func commentedTag() Tag {
-	return Tag{
-		ID:          "commented",
-		Description: "A project member has commented on this",
-	}
-}
+		rc := &RelatedConversation{
+			Organization: org,
+			Project:      project,
+			ID:           i,
+			Seen:         t,
+		}
 
-func sendTag() Tag {
-	return Tag{
-		ID:          "send",
-		Description: "A project member commented more recently than the author",
-	}
-}
+		if t.After(h.mtimeRef(rc)) {
+			klog.Infof("%s later referenced %s/%s #%d at %s: %s", co.URL, org, project, i, t, text)
+			h.updateMtimeLong(org, project, i, t)
+		}
 
-func recvTag() Tag {
-	return Tag{
-		ID:          "recv",
-		Description: "The author commented more recently than a project member",
-	}
-}
-
-func recvQTag() Tag {
-	return Tag{
-		ID:          "recv-q",
-		Description: "The author has asked a question since the last project member commented",
-	}
-}
-
-func openMilestoneTag() Tag {
-	return Tag{
-		ID:          "open-milestone",
-		Description: "The issue is associated to an open milestone",
-	}
-}
-
-func authorLast() Tag {
-	return Tag{
-		ID:          "author-last",
-		Description: "The last commenter was the original author",
-	}
-}
-
-func assocLast(role string) Tag {
-	return Tag{
-		ID:          fmt.Sprintf("%s-last", role),
-		Description: fmt.Sprintf("The last commenter was a project %s", role),
-	}
-}
-
-func closedTag() Tag {
-	return Tag{
-		ID:          "closed",
-		Description: "This item has been closed",
+		if !seen[fmt.Sprintf("%s/%d", rc.Project, rc.ID)] {
+			co.IssueRefs = append(co.IssueRefs, rc)
+		}
+		seen[fmt.Sprintf("%s/%d", rc.Project, rc.ID)] = true
 	}
 }

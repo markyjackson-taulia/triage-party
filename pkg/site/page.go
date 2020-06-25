@@ -17,6 +17,7 @@ package site
 import (
 	"context"
 	"fmt"
+	"html/template"
 	"time"
 
 	"github.com/google/triage-party/pkg/hubbub"
@@ -66,11 +67,11 @@ func (h *Handlers) collectionPage(ctx context.Context, id string, refresh bool) 
 		klog.V(2).Infof("lookup %q result: %d items", id, len(result.RuleResults))
 	}
 
-	dataAge = result.Time
+	dataAge = result.LatestInput
 	warning := ""
 
-	if time.Since(result.Time) > h.warnAge {
-		warning = fmt.Sprintf("Serving results from %s ago. Service started %s ago and is downloading new data. Use Shift-Reload to force refresh at any time.", humanDuration(time.Since(result.Time)), humanDuration(time.Since(h.startTime)))
+	if time.Since(result.LatestInput) > h.warnAge {
+		warning = fmt.Sprintf(`Service restarted %s ago, and is still downloading data. Data may be up to %s old and incomplete. You may use <a href="https://en.wikipedia.org/wiki/Wikipedia:Bypass_your_cache#Bypassing_cache">Shift-Reload</a> to force a data refresh at any time.`, humanDuration(time.Since(h.startTime)), humanDuration(time.Since(result.LatestInput)))
 	}
 
 	total := 0
@@ -78,29 +79,12 @@ func (h *Handlers) collectionPage(ctx context.Context, id string, refresh bool) 
 		total += len(o.Items)
 	}
 
-	uniqueFiltered := []*hubbub.Conversation{}
-	seenFiltered := map[int]bool{}
-
-	for _, o := range result.RuleResults {
-		for _, i := range o.Items {
-			if !seenFiltered[i.ID] {
-				uniqueFiltered = append(uniqueFiltered, i)
-				seenFiltered[i.ID] = true
-			}
-		}
+	age := result.LatestInput
+	if result.NewerThan.After(age) {
+		age = result.NewerThan
 	}
 
-	unique := []*hubbub.Conversation{}
-	seen := map[int]bool{}
-
-	for _, o := range result.RuleResults {
-		for _, i := range o.Items {
-			if !seen[i.ID] {
-				unique = append(unique, i)
-				seen[i.ID] = true
-			}
-		}
-	}
+	unique := uniqueItems(result.RuleResults)
 
 	p := &Page{
 		ID:               s.ID,
@@ -112,11 +96,10 @@ func (h *Handlers) collectionPage(ctx context.Context, id string, refresh bool) 
 		Description:      s.Description,
 		CollectionResult: result,
 		Total:            len(unique),
-		TotalShown:       len(uniqueFiltered),
 		Types:            "Issues",
-		Warning:          warning,
-		UniqueItems:      uniqueFiltered,
-		ResultAge:        time.Since(result.Time),
+		Warning:          template.HTML(warning),
+		UniqueItems:      unique,
+		ResultAge:        time.Since(age),
 	}
 
 	for _, s := range sts {
@@ -134,4 +117,19 @@ func (h *Handlers) collectionPage(ctx context.Context, id string, refresh bool) 
 	}
 
 	return p, nil
+}
+
+func uniqueItems(results []*triage.RuleResult) []*hubbub.Conversation {
+	items := []*hubbub.Conversation{}
+	seen := map[string]bool{}
+
+	for _, r := range results {
+		for _, i := range r.Items {
+			if !seen[i.URL] {
+				seen[i.URL] = true
+				items = append(items, i)
+			}
+		}
+	}
+	return items
 }

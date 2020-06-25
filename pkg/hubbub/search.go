@@ -11,17 +11,18 @@ import (
 
 	"github.com/google/go-github/v31/github"
 	"github.com/google/triage-party/pkg/logu"
+	"github.com/google/triage-party/pkg/tag"
 	"k8s.io/klog/v2"
 )
 
 // Search for GitHub issues or PR's
-func (h *Engine) SearchAny(ctx context.Context, org string, project string, fs []Filter, newerThan time.Time) ([]*Conversation, time.Time, error) {
-	cs, ts, err := h.SearchIssues(ctx, org, project, fs, newerThan)
+func (h *Engine) SearchAny(ctx context.Context, org string, project string, fs []Filter, newerThan time.Time, hidden bool) ([]*Conversation, time.Time, error) {
+	cs, ts, err := h.SearchIssues(ctx, org, project, fs, newerThan, hidden)
 	if err != nil {
 		return cs, ts, err
 	}
 
-	pcs, pts, err := h.SearchPullRequests(ctx, org, project, fs, newerThan)
+	pcs, pts, err := h.SearchPullRequests(ctx, org, project, fs, newerThan, hidden)
 	if err != nil {
 		return cs, ts, err
 	}
@@ -34,7 +35,7 @@ func (h *Engine) SearchAny(ctx context.Context, org string, project string, fs [
 }
 
 // Search for GitHub issues or PR's
-func (h *Engine) SearchIssues(ctx context.Context, org string, project string, fs []Filter, newerThan time.Time) ([]*Conversation, time.Time, error) {
+func (h *Engine) SearchIssues(ctx context.Context, org string, project string, fs []Filter, newerThan time.Time, hidden bool) ([]*Conversation, time.Time, error) {
 	fs = openByDefault(fs)
 	klog.V(1).Infof("Gathering raw data for %s/%s search %s - newer than %s", org, project, toYAML(fs), logu.STime(newerThan))
 	var wg sync.WaitGroup
@@ -86,10 +87,12 @@ func (h *Engine) SearchIssues(ctx context.Context, org string, project string, f
 	seen := map[string]bool{}
 
 	for _, i := range append(open, closed...) {
-		if h.debugNumber != 0 {
-			if i.GetNumber() == h.debugNumber {
+		if len(h.debug) > 0 {
+			klog.Infof("DEBUG FILTER: %s", h.debug)
+			if h.debug[i.GetNumber()] {
 				klog.Errorf("*** Found debug issue #%d:\n%s", i.GetNumber(), formatStruct(*i))
 			} else {
+				klog.V(2).Infof("Ignoring #%d - does not match debug filter: %v", i.GetNumber(), h.debug)
 				continue
 			}
 		}
@@ -125,12 +128,14 @@ func (h *Engine) SearchIssues(ctx context.Context, org string, project string, f
 			klog.V(1).Infof("#%d - %q did not match item filter: %s", i.GetNumber(), i.GetTitle(), toYAML(fs))
 			continue
 		}
+
 		klog.V(1).Infof("#%d - %q made it past pre-fetch: %s", i.GetNumber(), i.GetTitle(), toYAML(fs))
 
 		comments := []*github.IssueComment{}
-		if i.GetState() == "open" && i.GetComments() > 0 {
+
+		if needComments(i, fs) && i.GetComments() > 0 {
 			klog.V(1).Infof("#%d - %q: need comments for final filtering", i.GetNumber(), i.GetTitle())
-			comments, _, err = h.cachedIssueComments(ctx, org, project, i.GetNumber(), h.mtime(i))
+			comments, _, err = h.cachedIssueComments(ctx, org, project, i.GetNumber(), h.mtime(i), !newerThan.IsZero())
 			if err != nil {
 				klog.Errorf("comments: %v", err)
 			}
@@ -142,7 +147,7 @@ func (h *Engine) SearchIssues(ctx context.Context, org string, project string, f
 
 		co.Similar = h.FindSimilar(co)
 		if len(co.Similar) > 0 {
-			co.Tags = append(co.Tags, Tag{ID: "similar", Description: "Title appears similar to another PR or issue"})
+			co.Tags = append(co.Tags, tag.Similar)
 		}
 
 		if !postFetchMatch(co, fs) {
@@ -153,19 +158,19 @@ func (h *Engine) SearchIssues(ctx context.Context, org string, project string, f
 
 		updatedAt := h.mtime(i)
 		var timeline []*github.Timeline
-		if i.GetState() == "open" && updatedAt.After(i.GetCreatedAt()) {
-			timeline, err = h.cachedTimeline(ctx, org, project, i.GetNumber(), updatedAt)
+		if needTimeline(i, fs, false, hidden) {
+			timeline, err = h.cachedTimeline(ctx, org, project, i.GetNumber(), updatedAt, !newerThan.IsZero())
 			if err != nil {
 				klog.Errorf("timeline: %v", err)
 				continue
 			}
 		}
 
-		h.addEvents(ctx, co, timeline)
+		h.addEvents(ctx, co, timeline, !newerThan.IsZero())
 
 		// Some labels are judged by linked PR state. Ensure that they are updated to the same timestamp.
-		if len(co.PullRequestRefs) > 0 {
-			co.PullRequestRefs = h.updateLinkedPRs(ctx, co, mostRecentUpdate)
+		if needReviews(i, fs, hidden) && len(co.PullRequestRefs) > 0 {
+			co.PullRequestRefs = h.updateLinkedPRs(ctx, co, mostRecentUpdate, !newerThan.IsZero())
 		}
 
 		if !postEventsMatch(co, fs) {
@@ -201,7 +206,7 @@ func NeedsClosed(fs []Filter) bool {
 	return false
 }
 
-func (h *Engine) SearchPullRequests(ctx context.Context, org string, project string, fs []Filter, newerThan time.Time) ([]*Conversation, time.Time, error) {
+func (h *Engine) SearchPullRequests(ctx context.Context, org string, project string, fs []Filter, newerThan time.Time, hidden bool) ([]*Conversation, time.Time, error) {
 	fs = openByDefault(fs)
 
 	klog.V(1).Infof("Searching %s/%s for PR's matching: %s - newer than %s", org, project, toYAML(fs), logu.STime(newerThan))
@@ -258,15 +263,19 @@ func (h *Engine) SearchPullRequests(ctx context.Context, org string, project str
 			latest = pr.GetUpdatedAt()
 		}
 
-		if h.debugNumber != 0 {
-			if pr.GetNumber() == h.debugNumber {
+		klog.Infof("Found PR %s - updated at %s", pr.GetHTMLURL(), pr.GetUpdatedAt())
+		if len(h.debug) > 0 {
+			if h.debug[pr.GetNumber()] {
 				klog.Errorf("*** Found debug PR #%d:\n%s", pr.GetNumber(), formatStruct(*pr))
 			} else {
+				klog.V(2).Infof("Ignoring #%s - does not match debug filter: %v", pr.GetHTMLURL(), h.debug)
 				continue
 			}
 		}
 		prs = append(prs, pr)
 	}
+
+	klog.V(1).Infof("PR inspect count: %d", len(prs))
 
 	for _, pr := range prs {
 		klog.V(3).Infof("Found PR #%d with labels: %+v", pr.GetNumber(), pr.Labels)
@@ -278,38 +287,39 @@ func (h *Engine) SearchPullRequests(ctx context.Context, org string, project str
 		var timeline []*github.Timeline
 		var reviews []*github.PullRequestReview
 		var comments []*Comment
-		// pr.GetComments() always returns 0 :(
-		if pr.GetState() == "open" && pr.GetUpdatedAt().After(pr.GetCreatedAt()) {
-			comments, _, err = h.prComments(ctx, org, project, pr.GetNumber(), h.mtime(pr))
+
+		if needComments(pr, fs) {
+			comments, _, err = h.prComments(ctx, org, project, pr.GetNumber(), h.mtime(pr), !newerThan.IsZero())
 			if err != nil {
 				klog.Errorf("comments: %v", err)
 			}
+		}
 
-			timeline, err = h.cachedTimeline(ctx, org, project, pr.GetNumber(), h.mtime(pr))
+		if needTimeline(pr, fs, true, hidden) {
+			timeline, err = h.cachedTimeline(ctx, org, project, pr.GetNumber(), h.mtime(pr), !newerThan.IsZero())
 			if err != nil {
 				klog.Errorf("timeline: %v", err)
 				continue
 			}
+		}
 
-			reviews, _, err = h.cachedReviews(ctx, org, project, pr.GetNumber(), h.mtime(pr))
+		if needReviews(pr, fs, hidden) {
+			reviews, _, err = h.cachedReviews(ctx, org, project, pr.GetNumber(), h.mtime(pr), !newerThan.IsZero())
 			if err != nil {
 				klog.Errorf("reviews: %v", err)
 				continue
 			}
-
-		} else {
-			klog.Infof("skipping extended download for #%d - not updated", pr.GetNumber())
 		}
 
-		if pr.GetNumber() == h.debugNumber {
+		if h.debug[pr.GetNumber()] {
 			klog.Errorf("*** Debug PR timeline #%d:\n%s", pr.GetNumber(), formatStruct(timeline))
 		}
 
-		co := h.PRSummary(ctx, pr, comments, timeline, reviews, age)
+		co := h.PRSummary(ctx, pr, comments, timeline, reviews, age, !newerThan.IsZero())
 		co.Labels = pr.Labels
 		co.Similar = h.FindSimilar(co)
 		if len(co.Similar) > 0 {
-			co.Tags = append(co.Tags, Tag{ID: "similar", Description: "Title appears similar to another PR or issue"})
+			co.Tags = append(co.Tags, tag.Similar)
 		}
 
 		h.seen[co.URL] = co
@@ -328,6 +338,109 @@ func (h *Engine) SearchPullRequests(ctx context.Context, org string, project str
 
 	klog.V(1).Infof("%d of %d PR's within %s/%s matched filters:\n%s", len(filtered), len(prs), org, project, toYAML(fs))
 	return filtered, latest, nil
+}
+
+func needComments(i GitHubItem, fs []Filter) bool {
+	for _, f := range fs {
+		if f.TagRegex() != nil {
+			if ok, t := matchTag(tag.Tags, f.TagRegex(), f.TagNegate()); ok {
+				if t.NeedsComments {
+					klog.V(1).Infof("#%d - need comments due to tag %s (negate=%v)", i.GetNumber(), f.TagRegex(), f.TagNegate())
+					return true
+				}
+			}
+		}
+
+		if f.ClosedCommenters != "" || f.ClosedComments != "" {
+			klog.V(1).Infof("#%d - need comments due to closed comments", i.GetNumber())
+			return true
+		}
+
+		if f.Responded != "" || f.Commenters != "" {
+			klog.V(1).Infof("#%d - need comments due to responded/commenters filter", i.GetNumber())
+			return true
+		}
+	}
+
+	if i.GetState() != "open" {
+		return false
+	}
+
+	// Implementation note: hidden pages need comments too for generating Avg Wait time
+
+	// Do we need it? Not really. But it's useful for users to see the tags
+	return true
+}
+
+func needTimeline(i GitHubItem, fs []Filter, pr bool, hidden bool) bool {
+	if i.GetMilestone() != nil {
+		klog.V(2).Infof("#%d needs timeline: part of milestone", i.GetNumber())
+		return true
+	}
+
+	if i.GetState() != "open" {
+		klog.V(2).Infof("#%d no timeline required: in state %q", i.GetNumber(), i.GetState())
+		return false
+	}
+
+	if i.GetUpdatedAt() == i.GetCreatedAt() {
+		klog.V(2).Infof("#%d no timeline required: no update since creation", i.GetNumber())
+		return false
+	}
+
+	if pr {
+		klog.V(2).Infof("#%d timeline required: is open PR", i.GetNumber())
+		return true
+	}
+
+	for _, f := range fs {
+		if f.TagRegex() != nil {
+			if ok, t := matchTag(tag.Tags, f.TagRegex(), f.TagNegate()); ok {
+				if t.NeedsTimeline {
+					klog.V(1).Infof("#%d - need timeline due to tag %s (negate=%v)", i.GetNumber(), f.TagRegex(), f.TagNegate())
+					return true
+				}
+			}
+		}
+		if f.Prioritized != "" {
+			klog.V(1).Infof("#%d need timeline due to prioritized filter: %s", i.GetNumber(), f.Prioritized)
+			return true
+		}
+	}
+
+	if hidden {
+		klog.V(2).Infof("#%d no timeline required: on a hidden page", i.GetNumber())
+		return false
+	}
+
+	return true
+}
+
+func needReviews(i GitHubItem, fs []Filter, hidden bool) bool {
+	if i.GetState() != "open" {
+		return false
+	}
+
+	if i.GetUpdatedAt() == i.GetCreatedAt() {
+		return false
+	}
+
+	if hidden {
+		return false
+	}
+
+	for _, f := range fs {
+		if f.TagRegex() != nil {
+			if ok, t := matchTag(tag.Tags, f.TagRegex(), f.TagNegate()); ok {
+				if t.NeedsReviews {
+					klog.V(1).Infof("#%d - need reviews due to tag %s (negate=%v)", i.GetNumber(), f.TagRegex(), f.TagNegate())
+					return true
+				}
+			}
+		}
+	}
+
+	return true
 }
 
 func formatStruct(x interface{}) string {

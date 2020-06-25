@@ -38,7 +38,7 @@ import (
 )
 
 // VERSION is what version of Triage Party we advertise as.
-const VERSION = "v1.2.0-beta.2"
+const VERSION = "v1.2.0-beta.4"
 
 var (
 	nonWordRe = regexp.MustCompile(`\W`)
@@ -115,7 +115,7 @@ type Page struct {
 	ID          string
 	Title       string
 	Description string
-	Warning     string
+	Warning     template.HTML
 	Total       int
 	TotalShown  int
 	Types       string
@@ -126,9 +126,7 @@ type Page struct {
 	Players       int
 	PlayerChoices []string
 	PlayerNums    []int
-	Mode          int
 	Index         int
-	EmbedURL      string
 
 	AverageResponseLatency time.Duration
 	TotalPullRequests      int

@@ -42,7 +42,9 @@ type Collection struct {
 // The result of Execute
 type CollectionResult struct {
 	Collection *Collection
-	Time       time.Time
+
+	NewerThan   time.Time
+	LatestInput time.Time
 
 	RuleResults []*RuleResult
 
@@ -61,7 +63,7 @@ type CollectionResult struct {
 
 // ExecuteCollection executes a collection.
 func (p *Party) ExecuteCollection(ctx context.Context, s Collection, newerThan time.Time) (*CollectionResult, error) {
-	klog.V(1).Infof("executing collection %q: %s", s.ID, s.RuleIDs)
+	klog.V(1).Infof("executing collection %q: %s (newer than %s)", s.ID, s.RuleIDs, newerThan)
 	start := time.Now()
 
 	os := []*RuleResult{}
@@ -82,7 +84,8 @@ func (p *Party) ExecuteCollection(ctx context.Context, s Collection, newerThan t
 			return nil, err
 		}
 
-		ro, err := p.ExecuteRule(ctx, t, seen, newerThan)
+		hidden := s.Hidden && s.UsedForStats
+		ro, err := p.ExecuteRule(ctx, t, seen, newerThan, hidden)
 		if err != nil {
 			return nil, fmt.Errorf("rule %q: %w", t.Name, err)
 		}
@@ -95,11 +98,11 @@ func (p *Party) ExecuteCollection(ctx context.Context, s Collection, newerThan t
 	}
 
 	r := SummarizeCollectionResult(&s, os)
-	r.Time = newerThan
+	r.NewerThan = newerThan
 
 	// If we are lucky, our results may be newer than we asked for!
-	if latestInput.After(r.Time) {
-		r.Time = latestInput
+	if latestInput.After(r.LatestInput) {
+		r.LatestInput = latestInput
 	}
 
 	klog.V(1).Infof("collection %q took %s", s.ID, time.Since(start))
