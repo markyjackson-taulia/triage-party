@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"encoding/gob"
 	"fmt"
+	"github.com/google/triage-party/pkg/provider"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -102,7 +103,8 @@ func (m *MySQL) loadItems() error {
 		var item cache.Item
 		gd := gob.NewDecoder(bytes.NewBuffer(mi.Value))
 		if err := gd.Decode(&item); err != nil {
-			return fmt.Errorf("decode: %w", err)
+			klog.Errorf("decode failed for %s (saved %s, bytes: %d): %v", mi.Key, mi.Saved, len(mi.Value), err)
+			continue
 		}
 		decoded[mi.Key] = item
 	}
@@ -113,8 +115,16 @@ func (m *MySQL) loadItems() error {
 }
 
 // Set stores a thing
-func (m *MySQL) Set(key string, th *Thing) error {
+func (m *MySQL) Set(key string, th *provider.Thing) error {
 	setMem(m.cache, key, th)
+
+	go func() {
+		err := m.persist(key, th)
+		if err != nil {
+			klog.Errorf("failed to persist %s: %s", key, err)
+		}
+	}()
+
 	return nil
 }
 
@@ -125,43 +135,33 @@ func (m *MySQL) DeleteOlderThan(key string, t time.Time) error {
 }
 
 // GetNewerThan returns a Item older than a timestamp
-func (m *MySQL) GetNewerThan(key string, t time.Time) *Thing {
+func (m *MySQL) GetNewerThan(key string, t time.Time) *provider.Thing {
 	return newerThanMem(m.cache, key, t)
 }
 
-func (m *MySQL) Save() error {
-	start := time.Now()
-	newerThan := time.Now().Add(-1 * MaxSaveAge)
-	items := m.cache.Items()
-	klog.Infof("*** Saving %d items to MySQL", len(items))
+// persist writes an thing to MySQL
+func (m *MySQL) persist(key string, th *provider.Thing) error {
+	b := new(bytes.Buffer)
+	ge := gob.NewEncoder(b)
 
-	for k, v := range items {
-		th := v.Object.(*Thing)
-		if th.Created.Before(newerThan) {
-			klog.Infof("skipping %s (%s is too old)", k, th.Created)
-			continue
-		}
-
-		b := new(bytes.Buffer)
-		ge := gob.NewEncoder(b)
-		if err := ge.Encode(v); err != nil {
-			return fmt.Errorf("encode: %w", err)
-		}
-
-		if _, err := m.db.Exec(`
-			INSERT INTO persist (k, v, saved) VALUES (?, ?, ?)
-			ON DUPLICATE KEY UPDATE k=VALUES(k), v=VALUES(v)`,
-			k, b.Bytes(), start); err != nil {
-			return fmt.Errorf("sql exec: %v (len=%d)", err, len(b.Bytes()))
-		}
+	item := cache.Item{Object: th}
+	if err := ge.Encode(item); err != nil {
+		return fmt.Errorf("encode: %w", err)
 	}
 
-	return m.cleanup(newerThan)
+	_, err := m.db.Exec(`
+		INSERT INTO persist (k, v, saved) VALUES (?, ?, ?)
+		ON DUPLICATE KEY UPDATE k=VALUES(k), v=VALUES(v)`, key, b.Bytes(), time.Now())
+
+	return err
 }
 
 // Cleanup deletes older cache items
-func (m *MySQL) cleanup(t time.Time) error {
-	res, err := m.db.Exec(`DELETE FROM persist WHERE saved < ?`, t)
+func (m *MySQL) Cleanup() error {
+	start := time.Now()
+	maxAge := start.Add(-1 * MaxSaveAge)
+
+	res, err := m.db.Exec(`DELETE FROM persist WHERE saved < ?`, maxAge)
 
 	if err != nil {
 		return fmt.Errorf("delete exec: %w", err)

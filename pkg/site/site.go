@@ -17,11 +17,14 @@ package site
 
 import (
 	"fmt"
+	"github.com/google/triage-party/pkg/provider"
 	"html/template"
+	"image/color"
 	"math"
 	"net/http"
 	"net/url"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -31,14 +34,13 @@ import (
 	"github.com/google/triage-party/pkg/updater"
 
 	"github.com/dustin/go-humanize"
-	"github.com/google/go-github/v31/github"
 	"gopkg.in/yaml.v2"
 
 	"k8s.io/klog/v2"
 )
 
 // VERSION is what version of Triage Party we advertise as.
-const VERSION = "v1.2.0-beta.4"
+const VERSION = "v1.3.0"
 
 var (
 	nonWordRe = regexp.MustCompile(`\W`)
@@ -110,17 +112,19 @@ func (h *Handlers) Root() http.HandlerFunc {
 
 // Page are values that are passed into the renderer
 type Page struct {
-	Version     string
-	SiteName    string
-	ID          string
-	Title       string
-	Description string
-	Warning     template.HTML
-	Total       int
-	TotalShown  int
-	Types       string
-	UniqueItems []*hubbub.Conversation
-	ResultAge   time.Duration
+	Version      string
+	SiteName     string
+	ID           string
+	Title        string
+	Description  string
+	Warning      template.HTML
+	Notification template.HTML
+	Total        int
+	TotalShown   int
+	Types        string
+	UniqueItems  []*hubbub.Conversation
+	ResultAge    time.Duration
+	Stale        bool
 
 	Player        int
 	Players       int
@@ -141,7 +145,8 @@ type Page struct {
 	CollectionResult     *triage.CollectionResult
 	SelectorVar          string
 	SelectorOptions      []Choice
-	Milestone            *github.Milestone
+	Milestone            *provider.Milestone
+	CompletionETA        time.Time
 	MilestoneETA         time.Time
 	MilestoneCountOffset int
 	MilestoneVeryLate    bool
@@ -149,6 +154,7 @@ type Page struct {
 	OpenStats     *triage.CollectionResult
 	VelocityStats *triage.CollectionResult
 	GetVars       string
+	Status        string
 }
 
 // Choice is a selector choice
@@ -207,6 +213,58 @@ func className(s string) template.HTMLAttr {
 	return template.HTMLAttr(s)
 }
 
+func parseHexColor(s string) (c color.RGBA, err error) {
+	c.A = 0xff
+
+	if s[0] != '#' {
+		return c, fmt.Errorf("%q is not a valid hex color", s)
+	}
+
+	hexToByte := func(b byte) byte {
+		switch {
+		case b >= '0' && b <= '9':
+			return b - '0'
+		case b >= 'a' && b <= 'f':
+			return b - 'a' + 10
+		case b >= 'A' && b <= 'F':
+			return b - 'A' + 10
+		}
+		err = fmt.Errorf("%q is not a parseable hex color", s)
+		return 0
+	}
+
+	switch len(s) {
+	case 7:
+		c.R = hexToByte(s[1])<<4 + hexToByte(s[2])
+		c.G = hexToByte(s[3])<<4 + hexToByte(s[4])
+		c.B = hexToByte(s[5])<<4 + hexToByte(s[6])
+	case 4:
+		c.R = hexToByte(s[1]) * 17
+		c.G = hexToByte(s[2]) * 17
+		c.B = hexToByte(s[3]) * 17
+	default:
+		err = fmt.Errorf("%q is not a proper hex color", s)
+	}
+	return
+}
+
+// pick an appropriate text color given a background color
+func textColor(s string) template.CSS {
+
+	color, err := parseHexColor(fmt.Sprintf("#%s", strings.TrimPrefix(s, "#")))
+	if err != nil {
+		klog.Errorf("parse hex color failed: %v", err)
+		return "f00"
+	}
+
+	// human eye is most sensitive to green
+	lum := (0.299*float64(color.R) + 0.587*float64(color.G) + 0.114*float64(color.B)) / 255
+	if lum > 0.5 {
+		return "111"
+	}
+	return "fff"
+}
+
 func unixNano(t time.Time) int64 {
 	return t.UnixNano()
 }
@@ -248,7 +306,7 @@ func roughTime(t time.Time) string {
 	return ds
 }
 
-func avatar(u *github.User) template.HTML {
+func avatar(u *provider.User) template.HTML {
 	return template.HTML(fmt.Sprintf(`<a href="%s" title="%s"><img src="%s" width="20" height="20"></a>`, u.GetHTMLURL(), u.GetLogin(), u.GetAvatarURL()))
 }
 
@@ -264,7 +322,6 @@ func playerFilter(result *triage.CollectionResult, player int, players int) *tri
 
 		for _, i := range o.Items {
 			if (i.ID % players) == (player - 1) {
-				klog.V(3).Infof("%d belongs to player %d", i.ID, player)
 				cs = append(cs, i)
 			}
 		}
@@ -273,4 +330,34 @@ func playerFilter(result *triage.CollectionResult, player int, players int) *tri
 	}
 
 	return triage.SummarizeCollectionResult(result.Collection, os)
+}
+
+// Healthz returns a dummy healthz page - it's always happy here!
+func (h *Handlers) Healthz() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(fmt.Sprintf("ok: %s", h.updater.Status())))
+	}
+}
+
+// Threadz returns a threadz page
+func (h *Handlers) Threadz() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		klog.Infof("GET %s: %v", r.URL.Path, r.Header)
+		w.WriteHeader(http.StatusOK)
+		w.Write(stack())
+	}
+}
+
+// stack returns a formatted stack trace of all goroutines
+// It calls runtime.Stack with a large enough buffer to capture the entire trace.
+func stack() []byte {
+	buf := make([]byte, 1024)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			return buf[:n]
+		}
+		buf = make([]byte, 2*len(buf))
+	}
 }

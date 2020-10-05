@@ -37,6 +37,7 @@ func (h *Handlers) Collection() http.HandlerFunc {
 		"UnixNano":      unixNano,
 		"Avatar":        avatar,
 		"Class":         className,
+		"TextColor":     textColor,
 	}
 	t := template.Must(template.New("collection").Funcs(fmap).ParseFiles(
 		filepath.Join(h.baseDir, "collection.tmpl"),
@@ -89,7 +90,6 @@ func (h *Handlers) Collection() http.HandlerFunc {
 		p.Index = index
 		p.GetVars = getVars
 
-		klog.V(2).Infof("page context: %+v", p)
 		err = t.ExecuteTemplate(w, "base", p)
 
 		if err != nil {

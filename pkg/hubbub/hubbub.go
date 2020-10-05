@@ -19,16 +19,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/go-github/v31/github"
 	"github.com/google/triage-party/pkg/persist"
 	"k8s.io/klog/v2"
 )
 
 // Config is how to configure a new hubbub engine
 type Config struct {
-	Client *github.Client // Client is a GitHub client
-	Cache  persist.Cacher // Cacher is a cache interface
-	Repos  []string       // Repos is the repositories to search
+	Cache persist.Cacher // Cacher is a cache interface
+	Repos []string       // Repos is the repositories to search
 
 	// MinSimilarity is how close two items need to be to each other to be called similar
 	MinSimilarity float64
@@ -49,8 +47,7 @@ type Config struct {
 
 // Engine is the search engine interface for hubbub
 type Engine struct {
-	cache  persist.Cacher
-	client *github.Client
+	cache persist.Cacher
 
 	// Must be settable from config
 	MinSimilarity float64
@@ -69,14 +66,18 @@ type Engine struct {
 	// Workaround because GitHub doesn't update issues if cross-references occur
 	updatedAt map[string]time.Time
 
-	// indexes used for similarity matching
+	// indexes used for similarity matching & conversation caching
 	seen map[string]*Conversation
+}
+
+// ConversationsTotal returns the number of conversations we've seen so far
+func (e *Engine) ConversationsTotal() int {
+	return len(e.seen)
 }
 
 func New(cfg Config) *Engine {
 	e := &Engine{
-		cache:  cfg.Cache,
-		client: cfg.Client,
+		cache: cfg.Cache,
 
 		MaxClosedUpdateAge: cfg.MaxClosedUpdateAge,
 		seen:               map[string]*Conversation{},

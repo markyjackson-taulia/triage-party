@@ -73,6 +73,8 @@ type Updater struct {
 	persistFunc       PFunc
 	persistStart      time.Time
 	updateCycles      int
+
+	state string
 }
 
 // recordAccess records stats on collection accesses
@@ -82,6 +84,14 @@ func (u *Updater) recordAccess(id string) {
 		u.secondLastRequest.Store(id, last)
 	}
 	u.lastRequest.Store(id, time.Now())
+}
+
+// State returns a basic state
+func (u *Updater) Status() string {
+	if !u.persistStart.IsZero() {
+		return fmt.Sprintf("%s - persisting since %s (%d cycles, %s uptime)", u.state, u.persistStart, u.updateCycles, time.Since(u.startTime))
+	}
+	return fmt.Sprintf("%s (%d cycles, %s uptime)", u.state, u.updateCycles, time.Since(u.startTime))
 }
 
 // Lookup results for a given metric
@@ -136,14 +146,7 @@ func (u *Updater) shouldUpdate(id string, usedForStats bool, force bool) error {
 		return fmt.Errorf("results are not cached")
 	}
 
-	rtime := result.NewerThan
-
-	// There can be a lengthy run time on larger repos
-	if result.LatestInput.After(rtime) {
-		rtime = result.LatestInput
-	}
-
-	resultAge := time.Since(rtime)
+	resultAge := time.Since(result.Created)
 	maxRefresh := u.maxRefresh
 
 	// stats-based metrics can wait longer to refresh
@@ -152,7 +155,7 @@ func (u *Updater) shouldUpdate(id string, usedForStats bool, force bool) error {
 	}
 
 	if resultAge > maxRefresh {
-		return fmt.Errorf("%s at %s is older than max refresh age (%s), should update", id, logu.STime(result.NewerThan), resultAge)
+		return fmt.Errorf("%s at %s is older than max refresh age (%s), should update", id, logu.STime(result.Created), resultAge)
 	}
 
 	if force {
@@ -213,13 +216,16 @@ func (u *Updater) secondLastRequested(id string) time.Time {
 }
 
 func (u *Updater) update(ctx context.Context, s triage.Collection, newerThan time.Time) error {
+	start := time.Now()
+	u.state = fmt.Sprintf("updating %s to %s", s.ID, logu.STime(newerThan))
+
 	klog.Infof(">>> updating %q with data newer than %s >>>", s.ID, logu.STime(newerThan))
 	r, err := u.party.ExecuteCollection(ctx, s, newerThan)
 	if err != nil {
 		return err
 	}
 	u.cache[s.ID] = r
-	klog.Infof("<<< updated %q to %s (latest input: %s) <<<", s.ID, logu.STime(r.NewerThan), logu.STime(r.LatestInput))
+	klog.Infof("<<< updated %q to %s (oldest input: %s, duration: %s) <<<", s.ID, logu.STime(r.Created), logu.STime(r.OldestInput), time.Since(start))
 	return nil
 }
 
@@ -268,32 +274,23 @@ func (u *Updater) Persist() error {
 }
 
 func (u *Updater) shouldPersist(updated bool) bool {
+	// Already running
 	if !u.persistStart.IsZero() {
-		if updated {
-			klog.Infof("still persisting (%s)...", time.Since(u.persistStart))
-		}
 		return false
 	}
 
-	if u.updateCycles < 2 {
-		klog.Infof("Only on cycle %d, will wait longer before persist", u.updateCycles)
+	// No new data to persist
+	if !updated {
 		return false
 	}
-
-	sinceSave := time.Since(u.lastPersist)
 
 	// Avoid write contention by fuzzing
 	fuzz := time.Duration(rand.Intn(int(u.maxRefresh.Seconds()))) * time.Second
 	cutoff := u.maxRefresh + fuzz
-	if updated && sinceSave > cutoff {
-		klog.Infof("New data, and %s since cache has been saved (cutoff=%s)", cutoff, sinceSave)
-		return true
-	}
 
-	// Fallback for a very quiet repository, or bug that keeps us from realizing an update has occurred
-	cutoff = (u.maxRefresh * 4) + fuzz
+	sinceSave := time.Since(u.lastPersist)
 	if sinceSave > cutoff {
-		klog.Warningf("No new data, but %s since cache has been saved (cutoff=%s)", cutoff, sinceSave)
+		klog.Infof("Should persist: we have new data, and it's been %s since the last run", sinceSave)
 		return true
 	}
 
@@ -358,6 +355,8 @@ func (u *Updater) RunOnce(ctx context.Context, force bool) (bool, error) {
 
 // Update loop
 func (u *Updater) Loop(ctx context.Context) error {
+	u.state = "starting loop"
+
 	// Loop if everything goes to plan
 	klog.Infof("Looping: data will be updated between %s and %s (loop every %s)", u.minRefresh, u.maxRefresh, u.loopEvery)
 	ticker := time.NewTicker(u.loopEvery)
@@ -368,6 +367,7 @@ func (u *Updater) Loop(ctx context.Context) error {
 			klog.Errorf("err: %v", err)
 		}
 
+		u.state = fmt.Sprintf("idle, waiting %s", u.loopEvery)
 		u.lastRun = time.Now()
 
 		if u.shouldPersist(updated) {

@@ -15,9 +15,9 @@
 package hubbub
 
 import (
+	"github.com/google/triage-party/pkg/provider"
 	"time"
 
-	"github.com/google/go-github/v31/github"
 	"github.com/google/triage-party/pkg/tag"
 )
 
@@ -34,18 +34,19 @@ type Conversation struct {
 	Organization string `json:"organization"`
 	Project      string `json:"project"`
 
-	URL     string       `json:"url"`
-	Title   string       `json:"title"`
-	Author  *github.User `json:"author"`
-	Type    string       `json:"type"`
-	State   string       `json:"state"`
-	Created time.Time    `json:"created"`
+	URL     string         `json:"url"`
+	Title   string         `json:"title"`
+	Author  *provider.User `json:"author"`
+	Type    string         `json:"type"`
+	State   string         `json:"state"`
+	Created time.Time      `json:"created"`
 
 	// Latest comment or event
 	Updated time.Time `json:"updated"`
 
-	// Seen is the time we last saw this conversation
-	Seen time.Time `json:"seen"`
+	// Seen is the age of the data which generated this data
+	Seen         time.Time `json:"seen"`
+	CommentsSeen int       `json:"comments_seen"`
 
 	// When did this item reach the current priority?
 	Prioritized time.Time `json:"prioritized"`
@@ -61,52 +62,55 @@ type Conversation struct {
 	AccumulatedHoldTime time.Duration `json:"accumulated_hold_time"`
 	CurrentHoldTime     time.Duration `json:"current_hold_time"`
 
-	Assignees []*github.User  `json:"assignees"`
-	Labels    []*github.Label `json:"labels"`
+	Assignees []*provider.User  `json:"assignees"`
+	Labels    []*provider.Label `json:"labels"`
 
 	ReactionsTotal    int            `json:"reactions_total"`
 	Reactions         map[string]int `json:"reactions"`
 	ReactionsPerMonth float64        `json:"reactions_per_month"`
 
-	Commenters         []*github.User `json:"commenters"`
-	LastCommentBody    string         `json:"last_comment_body"`
-	LastCommentAuthor  *github.User   `json:"last_comment_author"`
-	CommentsTotal      int            `json:"comments_total"`
-	CommentersTotal    int            `json:"commenters_total"`
-	CommentersPerMonth float64        `json:"commenters_per_month"`
+	Commenters         []*provider.User `json:"commenters"`
+	LastCommentBody    string           `json:"last_comment_body"`
+	LastCommentAuthor  *provider.User   `json:"last_comment_author"`
+	CommentsTotal      int              `json:"comments_total"`
+	CommentersTotal    int              `json:"commenters_total"`
+	CommentersPerMonth float64          `json:"commenters_per_month"`
 
-	ClosedCommentsTotal   int          `json:"closed_comments_total"`
-	ClosedCommentersTotal int          `json:"closed_commenters_total"`
-	ClosedAt              time.Time    `json:"closed_at"`
-	ClosedBy              *github.User `json:"closed_by"`
+	ClosedCommentsTotal   int            `json:"closed_comments_total"`
+	ClosedCommentersTotal int            `json:"closed_commenters_total"`
+	ClosedAt              time.Time      `json:"closed_at"`
+	ClosedBy              *provider.User `json:"closed_by"`
+
+	TimelineTotal int `json:"timeline_total"`
+	ReviewsTotal  int `json:"reviews_total"`
 
 	IssueRefs       []*RelatedConversation `json:"issue_refs"`
 	PullRequestRefs []*RelatedConversation `json:"pull_request_refs"`
 
-	Tags []tag.Tag `json:"tags"`
+	Tags map[tag.Tag]bool `json:"tags"`
 
 	// Similar issues to this one
 	Similar []*RelatedConversation `json:"similar"`
 
-	Milestone *github.Milestone `json:"milestone"`
+	Milestone *provider.Milestone `json:"milestone"`
 }
 
 // A subset of Conversation for related items (requires less memory than a Conversation)
 type RelatedConversation struct {
-	Organization string    `json:"org"`
-	Project      string    `json:"project"`
-	ID           int       `json:"int"`
-	Tags         []tag.Tag `json:"tags"`
+	Organization string           `json:"org"`
+	Project      string           `json:"project"`
+	ID           int              `json:"int"`
+	Tags         map[tag.Tag]bool `json:"tags"`
 
-	URL         string       `json:"url"`
-	Title       string       `json:"title"`
-	Author      *github.User `json:"author"`
-	Type        string       `json:"type"`
-	State       string       `json:"state"`
-	Created     time.Time    `json:"created"`
-	Updated     time.Time    `json:"updated"`
-	Seen        time.Time    `json:"seen"`
-	ReviewState string       `json:"review_state"`
+	URL         string         `json:"url"`
+	Title       string         `json:"title"`
+	Author      *provider.User `json:"author"`
+	Type        string         `json:"type"`
+	State       string         `json:"state"`
+	Created     time.Time      `json:"created"`
+	Updated     time.Time      `json:"updated"`
+	Seen        time.Time      `json:"seen"`
+	ReviewState string         `json:"review_state"`
 }
 
 func makeRelated(c *Conversation) *RelatedConversation {

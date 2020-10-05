@@ -1,5 +1,41 @@
 # Release Notes
 
+## Version 1.3.0 - 2020-08-24
+
+* Defer comment tags until all data is fetched, use cached metadata when available [#207](https://github.com/google/triage-party/pull/207)
+* Make the Tags a set to avoid issues of DeDup [#203](https://github.com/google/triage-party/pull/203)
+* Use internal mtime tracking to determine in-memory issue validatity  [#205](https://github.com/google/triage-party/pull/205)
+* Add svg for future scaling image uses [#202](https://github.com/google/triage-party/pull/202)
+* fix startup panic [#199](https://github.com/google/triage-party/pull/199)
+* cursor:pointer for collapsible [#198](https://github.com/google/triage-party/pull/198)
+* Allow collections to define their own velocity stats [#191](https://github.com/google/triage-party/pull/191)
+
+Huge thank you for this release towards our contributors:
+
+- Grant Mccloskey
+- Thomas Strömberg
+- balopat
+
+## Version 1.2.1 - 2020-07-17
+
+* Return stale results if GitHub cannot be queried [#189](https://github.com/google/triage-party/pull/189)
+* Fix Kanban ETA estimation, add ETA for non-milestone pages [#188](https://github.com/google/triage-party/pull/188)
+* Automatically pick a contrasting label text color [#187](https://github.com/google/triage-party/pull/187)
+
+## Version 1.2.0 - 2020-07-14
+
+* Don't block page-loads if missing content, add healthz [#175](https://github.com/google/triage-party/pull/175)
+* Add --warn-age flag instead of determining automatically [#184](https://github.com/google/triage-party/pull/184)
+* Persist items on the fly rather than periodically in bulk [#183](https://github.com/google/triage-party/pull/183)
+* Base data age on oldest query time rather than data age [#181](https://github.com/google/triage-party/pull/181)
+* optimization: use cached conversations instead of re-parsing [#178](https://github.com/google/triage-party/pull/178)
+* Add status to /healthz, build similarity tables in the background [#177](https://github.com/google/triage-party/pull/177)
+* Add /threadz handler, fix data age calculation bug [#176](https://github.com/google/triage-party/pull/176)
+* Add comment cross-reference parsing, support multiple debug numbers [#169](https://github.com/google/triage-party/pull/169)
+* Fetch timelines for all issues within a milestone [#166](https://github.com/google/triage-party/pull/166)
+* Fetch timelines for issues that have zero comments [#165](https://github.com/google/triage-party/pull/165)
+* make comment fetching optional for the initial data cycle [#162](https://github.com/google/triage-party/pull/162)
+
 ## Version 1.2.0-beta.3 - 2020-06-19
 
 * Allow stale comment/timeline/review data on initial cycle [#155](https://github.com/google/triage-party/pull/155)

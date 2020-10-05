@@ -1,6 +1,7 @@
 package hubbub
 
 import (
+	"github.com/google/triage-party/pkg/provider"
 	"regexp"
 	"strings"
 
@@ -65,6 +66,22 @@ func normalizeTitle(t string) string {
 
 	klog.V(4).Infof("normalized: %s", strings.Join(keep, " "))
 	return strings.Join(keep, " ")
+}
+
+// updateSimilarIssues updates similarity tables, meant for background use
+func (h *Engine) updateSimilarIssues(key string, is []*provider.Issue) {
+	klog.V(1).Infof("Updating similarity table from issue cache %q (%d items)", key, len(is))
+	for _, i := range is {
+		h.updateSimilarityTables(i.GetTitle(), i.GetHTMLURL())
+	}
+}
+
+// updateSimilarPullRequests updates similarity tables, meant for background use
+func (h *Engine) updateSimilarPullRequests(key string, prs []*provider.PullRequest) {
+	klog.V(1).Infof("Updating similarity table from PR cache %q (%d items)", key, len(prs))
+	for _, i := range prs {
+		h.updateSimilarityTables(i.GetTitle(), i.GetHTMLURL())
+	}
 }
 
 func (h *Engine) updateSimilarityTables(rawTitle, url string) {
@@ -168,16 +185,13 @@ func (h *Engine) FindSimilar(co *Conversation) []*RelatedConversation {
 
 		oco := h.seen[url]
 		if oco == nil {
-			klog.V(3).Infof("find similar: no conversation found for %s -- must have been filtered out", url)
 			continue
 		}
 
 		if oco.Type != co.Type {
-			klog.V(4).Infof("Found similar item, but it's a %s and I am a %s", oco.Type, co.Type)
 			continue
 		}
 
-		klog.V(3).Infof("found similar %s %s: %q", oco.Type, oco.Title, url)
 		simco = append(simco, makeRelated(h.seen[url]))
 		added[url] = true
 	}

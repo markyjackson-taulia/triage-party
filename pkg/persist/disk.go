@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"encoding/gob"
 	"fmt"
+	"github.com/google/triage-party/pkg/provider"
 	"io"
 	"io/ioutil"
 	"os"
@@ -50,7 +51,7 @@ func (d *Disk) Initialize() error {
 	if err := d.load(); err != nil {
 		klog.Infof("recreating cache due to load error: %v", err)
 		d.cache = createMem()
-		if err := d.Save(); err != nil {
+		if err := d.Cleanup(); err != nil {
 			return fmt.Errorf("save: %w", err)
 		}
 	}
@@ -82,8 +83,9 @@ func (d *Disk) load() error {
 }
 
 // Set stores a thing into memory
-func (d *Disk) Set(key string, t *Thing) error {
+func (d *Disk) Set(key string, t *provider.Thing) error {
 	setMem(d.cache, key, t)
+	// Implementation quirk: the disk driver does not persist until Cleanup() is called
 	return nil
 }
 
@@ -94,11 +96,11 @@ func (d *Disk) DeleteOlderThan(key string, t time.Time) error {
 }
 
 // GetNewerThan returns a thing older than a timestamp
-func (d *Disk) GetNewerThan(key string, t time.Time) *Thing {
+func (d *Disk) GetNewerThan(key string, t time.Time) *provider.Thing {
 	return newerThanMem(d.cache, key, t)
 }
 
-func (d *Disk) Save() error {
+func (d *Disk) Cleanup() error {
 	items := d.cache.Items()
 	klog.Infof("*** Saving %d items to disk cache at %s", len(items), d.path)
 

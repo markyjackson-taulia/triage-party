@@ -34,10 +34,9 @@ const (
 
 func (h *Handlers) collectionPage(ctx context.Context, id string, refresh bool) (*Page, error) {
 	start := time.Now()
-	dataAge := time.Time{}
 
 	defer func() {
-		klog.Infof("Served %q request within %s from data %s old", id, time.Since(start), time.Since(dataAge))
+		klog.Infof("Served %q request within %s", id, time.Since(start))
 	}()
 
 	s, err := h.party.LookupCollection(id)
@@ -55,33 +54,18 @@ func (h *Handlers) collectionPage(ctx context.Context, id string, refresh bool) 
 		result = h.updater.ForceRefresh(ctx, id)
 		klog.Infof("refresh %q result: %d items", id, len(result.RuleResults))
 	} else {
-		result = h.updater.Lookup(ctx, id, true)
+		result = h.updater.Lookup(ctx, id, false)
 		if result == nil {
-			return nil, fmt.Errorf("lookup %q returned no data", id)
+			klog.Errorf("lookup %q returned no data", id)
+			result = &triage.CollectionResult{}
+		} else if result.RuleResults == nil {
+			klog.Errorf("lookup %q returned no results: %+v", id, result)
 		}
-
-		if result.RuleResults == nil {
-			return nil, fmt.Errorf("lookup %q returned no results", id)
-		}
-
-		klog.V(2).Infof("lookup %q result: %d items", id, len(result.RuleResults))
-	}
-
-	dataAge = result.LatestInput
-	warning := ""
-
-	if time.Since(result.LatestInput) > h.warnAge {
-		warning = fmt.Sprintf(`Service restarted %s ago, and is still downloading data. Data may be up to %s old and incomplete. You may use <a href="https://en.wikipedia.org/wiki/Wikipedia:Bypass_your_cache#Bypassing_cache">Shift-Reload</a> to force a data refresh at any time.`, humanDuration(time.Since(h.startTime)), humanDuration(time.Since(result.LatestInput)))
 	}
 
 	total := 0
 	for _, o := range result.RuleResults {
 		total += len(o.Items)
-	}
-
-	age := result.LatestInput
-	if result.NewerThan.After(age) {
-		age = result.NewerThan
 	}
 
 	unique := uniqueItems(result.RuleResults)
@@ -97,21 +81,32 @@ func (h *Handlers) collectionPage(ctx context.Context, id string, refresh bool) 
 		CollectionResult: result,
 		Total:            len(unique),
 		Types:            "Issues",
-		Warning:          template.HTML(warning),
 		UniqueItems:      unique,
-		ResultAge:        time.Since(age),
+		ResultAge:        time.Since(result.OldestInput),
+		Status:           h.updater.Status(),
 	}
 
-	for _, s := range sts {
-		if s.UsedForStats {
-			if s.ID == VelocityStatsName {
-				p.VelocityStats = h.updater.Lookup(ctx, s.ID, false)
-				continue
-			}
-			// Older configs may not use OpenStatsName
-			if s.ID == OpenStatsName || p.OpenStats == nil {
-				p.OpenStats = h.updater.Lookup(ctx, s.ID, false)
-				continue
+	if result.RuleResults == nil {
+		p.Notification = template.HTML(fmt.Sprintf("Gathering data (%d issues examined) ...", h.party.ConversationsTotal()))
+	} else if p.ResultAge > h.warnAge {
+		p.Notification = template.HTML(fmt.Sprintf(`Refreshing data in the background. Displayed data may be up to %s old. Use <a href="https://en.wikipedia.org/wiki/Wikipedia:Bypass_your_cache#Bypassing_cache">Shift-Reload</a> to force a data refresh at any time.`, humanDuration(time.Since(result.OldestInput))))
+		p.Stale = true
+	}
+
+	if result.Collection != nil && result.Collection.Velocity != "" {
+		p.VelocityStats = h.updater.Lookup(ctx, result.Collection.Velocity, false)
+	} else {
+		for _, s := range sts {
+			if s.UsedForStats {
+				if s.ID == VelocityStatsName {
+					p.VelocityStats = h.updater.Lookup(ctx, s.ID, false)
+					continue
+				}
+				// Older configs may not use OpenStatsName
+				if s.ID == OpenStatsName || p.OpenStats == nil {
+					p.OpenStats = h.updater.Lookup(ctx, s.ID, false)
+					continue
+				}
 			}
 		}
 	}

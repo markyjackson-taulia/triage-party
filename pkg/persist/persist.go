@@ -18,17 +18,16 @@ package persist
 import (
 	"encoding/gob"
 	"fmt"
+	"github.com/google/triage-party/pkg/provider"
 	"os"
 	"time"
-
-	"github.com/google/go-github/v31/github"
 )
 
 var (
 	// MaxSaveAge is the oldest allowable entry to persist
-	MaxSaveAge = 30 * 24 * time.Hour
+	MaxSaveAge = 2 * 24 * time.Hour
 	// MaxLoadAge is the oldest allowable entry to load
-	MaxLoadAge = 45 * 24 * time.Hour
+	MaxLoadAge = 10 * 24 * time.Hour
 )
 
 // Config is cache configuration
@@ -37,32 +36,20 @@ type Config struct {
 	Path string
 }
 
-type Thing struct {
-	Created time.Time
-
-	PullRequests        []*github.PullRequest
-	Issues              []*github.Issue
-	PullRequestComments []*github.PullRequestComment
-	IssueComments       []*github.IssueComment
-	Timeline            []*github.Timeline
-	Reviews             []*github.PullRequestReview
-	StringBool          map[string]bool
-}
-
 // Cacher is the cache interface we support
 type Cacher interface {
 	String() string
 
-	Set(string, *Thing) error
+	Set(string, *provider.Thing) error
 	DeleteOlderThan(string, time.Time) error
-	GetNewerThan(string, time.Time) *Thing
+	GetNewerThan(string, time.Time) *provider.Thing
 
 	Initialize() error
-	Save() error
+	Cleanup() error
 }
 
 func New(cfg Config) (Cacher, error) {
-	gob.Register(&Thing{})
+	gob.Register(&provider.Thing{})
 	switch cfg.Type {
 	case "mysql":
 		return NewMySQL(cfg)

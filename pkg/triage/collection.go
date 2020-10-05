@@ -17,6 +17,7 @@ package triage
 import (
 	"context"
 	"fmt"
+	"github.com/google/triage-party/pkg/provider"
 	"time"
 
 	"github.com/google/triage-party/pkg/hubbub"
@@ -37,14 +38,16 @@ type Collection struct {
 	Display  string `yaml:"display"`
 	Overflow int    `yaml:"overflow"`
 	Selector string `yaml:"selector"`
+	Velocity string `yaml:"velocity"`
 }
 
 // The result of Execute
 type CollectionResult struct {
 	Collection *Collection
 
+	Created     time.Time
 	NewerThan   time.Time
-	LatestInput time.Time
+	OldestInput time.Time
 
 	RuleResults []*RuleResult
 
@@ -69,7 +72,7 @@ func (p *Party) ExecuteCollection(ctx context.Context, s Collection, newerThan t
 	os := []*RuleResult{}
 	seen := map[string]*Rule{}
 	seenRule := map[string]bool{}
-	var latestInput time.Time
+	oldest := time.Now()
 
 	for _, tid := range s.RuleIDs {
 		if seenRule[tid] {
@@ -85,13 +88,18 @@ func (p *Party) ExecuteCollection(ctx context.Context, s Collection, newerThan t
 		}
 
 		hidden := s.Hidden && s.UsedForStats
-		ro, err := p.ExecuteRule(ctx, t, seen, newerThan, hidden)
+
+		sp := provider.SearchParams{
+			NewerThan: newerThan,
+			Hidden:    hidden,
+		}
+		ro, err := p.ExecuteRule(ctx, sp, t, seen)
 		if err != nil {
 			return nil, fmt.Errorf("rule %q: %w", t.Name, err)
 		}
 
-		if ro.LatestInput.After(latestInput) {
-			latestInput = ro.LatestInput
+		if ro.OldestInput.Before(oldest) {
+			oldest = ro.OldestInput
 		}
 
 		os = append(os, ro)
@@ -99,13 +107,10 @@ func (p *Party) ExecuteCollection(ctx context.Context, s Collection, newerThan t
 
 	r := SummarizeCollectionResult(&s, os)
 	r.NewerThan = newerThan
+	r.OldestInput = oldest
+	r.Created = time.Now()
 
-	// If we are lucky, our results may be newer than we asked for!
-	if latestInput.After(r.LatestInput) {
-		r.LatestInput = latestInput
-	}
-
-	klog.V(1).Infof("collection %q took %s", s.ID, time.Since(start))
+	klog.V(1).Infof("collection %q took %s, results as of %s", s.ID, time.Since(start), r.OldestInput)
 	return r, nil
 }
 

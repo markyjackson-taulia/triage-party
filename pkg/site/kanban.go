@@ -16,6 +16,8 @@ package site
 
 import (
 	"fmt"
+	"github.com/google/triage-party/pkg/constants"
+	"github.com/google/triage-party/pkg/provider"
 	"html/template"
 	"math"
 	"net/http"
@@ -25,7 +27,6 @@ import (
 	"time"
 
 	"github.com/dustin/go-humanize"
-	"github.com/google/go-github/v31/github"
 	"github.com/google/triage-party/pkg/hubbub"
 	"github.com/google/triage-party/pkg/triage"
 	"k8s.io/klog/v2"
@@ -35,12 +36,12 @@ var unassigned = "zz_unassigned"
 
 // Swimlane is a row in a Kanban display.
 type Swimlane struct {
-	User    *github.User
+	User    *provider.User
 	Columns []*triage.RuleResult
 	Issues  int
 }
 
-func avatarWide(u *github.User) template.HTML {
+func avatarWide(u *provider.User) template.HTML {
 	if u.GetLogin() == unassigned {
 		return template.HTML(`<div class="unassigned"><div class="unassigned-icon" title="Unassigned work - free for the taking!"></div><span>nobody</span></div>`)
 	}
@@ -60,7 +61,7 @@ func groupByUser(results []*triage.RuleResult, milestoneID int, dedup bool) []*S
 
 			assignees := co.Assignees
 			if len(assignees) == 0 {
-				assignees = append(assignees, &github.User{
+				assignees = append(assignees, &provider.User{
 					Login: &unassigned,
 				})
 			}
@@ -137,32 +138,27 @@ func (h *Handlers) Kanban() http.HandlerFunc {
 			return
 		}
 
-		if len(p.CollectionResult.RuleResults) == 0 {
-			http.Error(w, fmt.Sprintf("no results for %q", id), 400)
-			return
+		if p.CollectionResult.RuleResults != nil {
+			chosen, milestones := milestoneChoices(p.CollectionResult.RuleResults, milestoneID)
+			klog.Infof("milestones chosen: %d, choices: %+v", milestoneID, milestones)
+
+			p.Description = p.Collection.Description
+			p.Swimlanes = groupByUser(p.CollectionResult.RuleResults, chosen.GetNumber(), p.Collection.Dedup)
+			p.SelectorOptions = milestones
+			p.SelectorVar = "milestone"
+			p.Milestone = chosen
+			p.ClosedPerDay = calcClosedPerDay(p.VelocityStats)
+			p.CompletionETA = calcETA(p.Swimlanes, p.ClosedPerDay)
+
+			etaDate, etaOffset, countOffset := calcMilestoneETA(chosen, p.ClosedPerDay)
+			klog.Infof("milestone ETA is %s (offset: %s, %d issues)", etaDate, etaOffset, countOffset)
+			p.MilestoneETA = etaDate
+			p.MilestoneCountOffset = countOffset
+
+			if etaOffset > 6*24*time.Hour {
+				p.MilestoneVeryLate = true
+			}
 		}
-
-		chosen, milestones := milestoneChoices(p.CollectionResult.RuleResults, milestoneID)
-
-		klog.Infof("milestones chosen: %d, choices: %+v", milestoneID, milestones)
-
-		p.Description = p.Collection.Description
-		p.Swimlanes = groupByUser(p.CollectionResult.RuleResults, chosen.GetNumber(), p.Collection.Dedup)
-		p.SelectorOptions = milestones
-		p.SelectorVar = "milestone"
-		p.Milestone = chosen
-		p.ClosedPerDay = calcClosedPerDay(p.VelocityStats)
-
-		etaDate, etaOffset, countOffset := calcETA(chosen, p.ClosedPerDay)
-		klog.Infof("milestone ETA is %s (offset: %s, %d issues)", etaDate, etaOffset, countOffset)
-		p.MilestoneETA = etaDate
-		p.MilestoneCountOffset = countOffset
-
-		if etaOffset > 6*24*time.Hour {
-			p.MilestoneVeryLate = true
-		}
-
-		klog.V(2).Infof("page context: %+v", p)
 
 		err = t.ExecuteTemplate(w, "base", p)
 		if err != nil {
@@ -171,6 +167,25 @@ func (h *Handlers) Kanban() http.HandlerFunc {
 			return
 		}
 	}
+}
+
+func calcETA(lanes []*Swimlane, perDay float64) time.Time {
+	open := map[string]bool{}
+
+	for _, lane := range lanes {
+		for _, c := range lane.Columns {
+			if c != nil {
+				for _, co := range c.Items {
+					if (co.State == constants.OpenState) || (co.State == constants.OpenedState) {
+						open[co.URL] = true
+					}
+				}
+			}
+		}
+	}
+
+	days := float64(len(open)) / perDay
+	return time.Now().AddDate(0, 0, int(days))
 }
 
 func calcClosedPerDay(r *triage.CollectionResult) float64 {
@@ -198,12 +213,13 @@ func calcClosedPerDay(r *triage.CollectionResult) float64 {
 	}
 
 	days := time.Since(oldestClosure).Hours() / 24
-	closeRate := days / float64(len(seen))
+	closeRate := float64(len(seen)) / days
 	klog.Infof("close rate is %.2f (%.1f days of data, %d issues)", closeRate, days, r.TotalIssues)
 	return closeRate
 }
 
-func calcETA(m *github.Milestone, closeRate float64) (time.Time, time.Duration, int) {
+// TODO: Merge into calcETA
+func calcMilestoneETA(m *provider.Milestone, closeRate float64) (time.Time, time.Duration, int) {
 	if m == nil {
 		klog.Errorf("unable to calc ETA: no milestone")
 		return time.Time{}, time.Duration(0), 0
@@ -234,8 +250,8 @@ func calcETA(m *github.Milestone, closeRate float64) (time.Time, time.Duration, 
 	return eta, overByDuration, overByCount
 }
 
-func milestoneChoices(results []*triage.RuleResult, milestoneID int) (*github.Milestone, []Choice) {
-	mmap := map[int]*github.Milestone{}
+func milestoneChoices(results []*triage.RuleResult, milestoneID int) (*provider.Milestone, []Choice) {
+	mmap := map[int]*provider.Milestone{}
 
 	notInMilestone := 0
 
@@ -252,7 +268,7 @@ func milestoneChoices(results []*triage.RuleResult, milestoneID int) (*github.Mi
 		}
 	}
 
-	milestones := []*github.Milestone{}
+	milestones := []*provider.Milestone{}
 	for _, v := range mmap {
 		milestones = append(milestones, v)
 	}
@@ -275,7 +291,7 @@ func milestoneChoices(results []*triage.RuleResult, milestoneID int) (*github.Mi
 
 	choices := []Choice{}
 
-	var chosen *github.Milestone
+	var chosen *provider.Milestone
 
 	for _, m := range milestones {
 		c := Choice{

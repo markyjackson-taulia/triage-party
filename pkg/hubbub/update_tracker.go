@@ -16,6 +16,8 @@ package hubbub
 
 import (
 	"fmt"
+	"github.com/google/triage-party/pkg/provider"
+	"runtime"
 	"strings"
 	"time"
 
@@ -23,7 +25,7 @@ import (
 )
 
 // mtime is a workaround the GitHub misfeature that UpdatedAt is not incremented for cross-reference events
-func (h *Engine) mtime(i GitHubItem) time.Time {
+func (h *Engine) mtime(i provider.IItem) time.Time {
 	return h.mtimeKey(i.GetUpdatedAt(), updateKey(i))
 }
 
@@ -40,24 +42,20 @@ func (h *Engine) mtimeRef(rc *RelatedConversation) time.Time {
 func (h *Engine) mtimeKey(idea time.Time, key string) time.Time {
 	updatedAt := idea
 	updateSeen := h.updatedAt[key]
+	klog.V(2).Infof("%s was definitely updated by %s - possibly by %s", key, updatedAt, updateSeen)
 
 	if updateSeen == updatedAt {
 		return updatedAt
 	}
 
 	if updateSeen.After(updatedAt) {
-		if !updatedAt.IsZero() {
-			klog.Infof("YAY! %s has updates from %s, after last update %s", key, updateSeen, updatedAt)
-		}
 		return updateSeen
-	} else if !updatedAt.IsZero() {
-		klog.V(3).Infof("%s has updates from %s, before last update %s", key, updateSeen, updatedAt)
 	}
 
 	return updatedAt
 }
 
-func updateKey(i GitHubItem) string {
+func updateKey(i provider.IItem) string {
 	// https://github.com/kubernetes/minikube/pull/8431
 	parts := strings.Split(i.GetHTMLURL(), "/")
 	if len(parts) < 7 {
@@ -71,7 +69,7 @@ func updateKey(i GitHubItem) string {
 	return fmt.Sprintf("%s/%s#%s", org, project, num)
 }
 
-func (h *Engine) updateMtime(i GitHubItem, t time.Time) {
+func (h *Engine) updateMtime(i provider.IItem, t time.Time) {
 	key := updateKey(i)
 	h.updateMtimeByKey(key, t)
 }
@@ -89,7 +87,12 @@ func (h *Engine) updateMtimeLong(org string, project string, num int, t time.Tim
 func (h *Engine) updateMtimeByKey(key string, ts time.Time) {
 	if ts.After(h.updatedAt[key]) {
 		if !h.updatedAt[key].IsZero() {
-			klog.Infof("Updating %s last update time for %s to %s", key, h.updatedAt[key], ts)
+			_, file, no, ok := runtime.Caller(2)
+			if ok {
+				klog.V(2).Infof("Updating %s last update time for %s to %s - caller: %s:%d", key, h.updatedAt[key], ts, file, no)
+			} else {
+				klog.V(2).Infof("Updating %s last update time for %s to %s", key, h.updatedAt[key], ts)
+			}
 		}
 		h.updatedAt[key] = ts
 	}

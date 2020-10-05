@@ -44,19 +44,26 @@
 {{template "subnav" . }}
   <section class="section">
     <div class="tp-container">
-    {{- if ne .Warning "" }}
-    <div class="notification is-warning">
-      <button class="delete"></button>
-      {{ .Warning }}
-    </div>
-    {{ end }}
+      {{- if ne .Notification "" }}
+        <div class="notification is-info">
+          <button class="delete"></button>
+          {{ .Notification }}
+        </div>
+      {{ end }}
+
+      {{- if ne .Warning "" }}
+        <div class="notification is-warning">
+          <button class="delete"></button>
+          {{ .Warning }}
+        </div>
+      {{ end }}
       {{template "content" .}}
-    </div>
+  </div>
   </section>
 
   <section>
   <div class="content has-text-right">
-  <a href="http://github.com/google/triage-party">Triage Party {{.Version}}</a>&nbsp;
+  <a href="http://github.com/google/triage-party" title="{{.Status}}">Triage Party {{.Version}}</a>&nbsp;
   </div>
   </section>
 
